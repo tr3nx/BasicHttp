@@ -1,35 +1,63 @@
 import asynchttpserver,
        asyncnet,
        asyncdispatch,
-       json
+       json,
+       db_postgres,
+       sequtils,
+       strutils,
+       times
 
 type
+  Response = (HttpCode, string, HttpHeaders)
+  Routes = array[2, Route]
   Route = object
     path: string
     name: string
-    kind: HttpMethod
+    meth: HttpMethod
     fn: proc (req: Request, headers: Httpheaders): Response {.gcsafe.}
-  Routes = array[4, Route]
-  Response = (HttpCode, string, HttpHeaders)
+
+  Endpoint = object
+    id: int
+    name: string
+    path: string
+    data: string
+    created_at: int
+    deleted_at: int
 
 var
+  db: DbConn
   routes {.threadvar.}: Routes
 
 proc home(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"homepage": true})
-  (Http200, data, headers)
+  var ends: seq[Endpoint]
 
-proc ip(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"ip": asyncnet.getPeerAddr(req.client)[0]})
-  (Http200, data, headers)
+  # for row in db.rows(sql"SELECT id,name,path,data,created_at FROM endpoints WHERE deleted_at is NULL"):
+    # ends.add(Endpoint(
+    #   id: parseInt(row[0]),
+    #   name: row[1],
+    #   path: row[2],
+    #   data: row[3],
+    #   created_at: parseInt(row[4])
+    # ))
+
+  let row = db.getRow(sql"SELECT id,name,path,data,created_at FROM endpoints LIMIT 1")
+  ends.add(Endpoint(
+    id: parseInt(row[0]),
+    name: row[1],
+    path: row[2],
+    data: row[3],
+    created_at: parseInt(row[4])
+  ))
+
+  (Http200, $(%*ends), headers)
 
 proc fourohfour(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"error": 404})
+  var data = $(%* {"error": 404})
   (Http404, data, headers)
 
 proc parseRoute(req: Request): Route =
   for r in routes:
-    if r.path == req.url.path and r.kind == req.reqMethod:
+    if r.path == req.url.path and r.meth == req.reqMethod:
       return r
   return routes[0]
 
@@ -45,11 +73,14 @@ proc asyncHttpHandler(req: Request) {.async.} =
 
 when isMainModule:
   routes = [
-    Route(path: "/404",    name: "404",    kind: HttpGet, fn: fourohfour),
-    Route(path: "/",       name: "root",   kind: HttpGet, fn: home),
-    Route(path: "/home",   name: "home",   kind: HttpGet, fn: home),
-    Route(path: "/ip",     name: "ip",     kind: HttpGet, fn: ip)
+    Route(path: "/404", name: "404",  meth: HttpGet, fn: fourohfour),
+    Route(path: "/",    name: "root", meth: HttpGet, fn: home)
   ]
+
+  db = open("localhost", "postgres", "", "misc")
+
+  # db.exec(sql"CREATE TABLE endpoints (id serial primary key, name varchar(128) not null, path varchar(32) not null, data text not null, created_at integer not null, deleted_at integer null)")
+  # db.exec(sql"INSERT INTO endpoints (name, path, data, created_at) VALUES (?, ?, ?, ?)", "the real test here", "/real", $(%*{"test":true}), getTime().toUnix)
 
   var server = newAsyncHttpServer()
   waitFor server.serve(Port(6000), asyncHttpHandler)
