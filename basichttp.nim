@@ -1,55 +1,64 @@
-import asynchttpserver,
-       asyncnet,
-       asyncdispatch,
-       json
+import asynchttpserver
+     , asyncdispatch
+     , strutils
+     , json
+     , uri
+     , re
 
 type
-  Route = object
-    path: string
-    name: string
-    kind: HttpMethod
-    fn: proc (req: Request, headers: Httpheaders): Response {.gcsafe.}
   Routes = array[4, Route]
-  Response = (HttpCode, string, HttpHeaders)
+  Route = object
+    path: Regex
+    name: string
+    meth: HttpMethod
+    fn: proc (req: Request, resp: Response, args: varargs[string]): Response {.gcsafe.}
+  Response = object
+    code: HttpCode
+    data: string
+    headers: Httpheaders
 
 var
   routes {.threadvar.}: Routes
 
-proc home(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"homepage": true})
-  (Http200, data, headers)
+proc home(req: Request, resp: Response, arg: varargs[string]): Response =
+  result = resp
+  result.data = `$`(%* {"homepage": true})
 
-proc ip(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"ip": asyncnet.getPeerAddr(req.client)[0]})
-  (Http200, data, headers)
+proc item(req: Request, resp: Response, arg: varargs[string]): Response =
+  result = resp
+  let id = if arg[0] != "": parseInt(arg[0]) else: 0
+  result.data = `$`(%*{"item": id})
 
-proc fourohfour(req: Request, headers: Httpheaders): Response =
-  var data = `$`(%* {"error": 404})
-  (Http404, data, headers)
-
-proc parseRoute(req: Request): Route =
-  for r in routes:
-    if r.path == req.url.path and r.kind == req.reqMethod:
-      return r
-  return routes[0]
-
-proc processRequest(req: Request): Response =
-  let
-    route = parseRoute(req)
-    headers = newHttpHeaders([("Content-Type","application/json")])
-  route.fn(req, headers)
+proc fourohfour(req: Request, resp: Response, arg: varargs[string]): Response =
+  result = resp
+  result.data = `$`(%* {"error": 404})
 
 proc asyncHttpHandler(req: Request) {.async.} =
-  let (status, data, headers) = processRequest(req)
-  await req.respond(status, data, headers)
+  var
+    resp = Response(code: Http200, headers: newHttpHeaders([("Content-Type","application/json")]))
+    route: Route = routes[0]
+    args: string
+
+  if req.url.path == "/":
+    route = routes[1]
+  else:
+    for r in routes[2..routes.len-1]:
+      if r.meth != req.reqMethod: break
+
+      var matches: array[1, string]
+      if re.match(req.url.path, r.path, matches) and matches.len > 0:
+        args = $matches[0]
+        route = r
+
+  resp = route.fn(req, resp, args)
+  await req.respond(resp.code, `$`(%*resp.data), resp.headers)
 
 when isMainModule:
-  routes = [
-    Route(path: "/404",    name: "404",    kind: HttpGet, fn: fourohfour),
-    Route(path: "/",       name: "root",   kind: HttpGet, fn: home),
-    Route(path: "/home",   name: "home",   kind: HttpGet, fn: home),
-    Route(path: "/ip",     name: "ip",     kind: HttpGet, fn: ip)
-  ]
+  routes = [ Route(path: re("/404"), name: "404", meth: HttpGet, fn: fourohfour)
+           , Route(path: re("/"), name: "root", meth: HttpGet, fn: home)
+           , Route(path: re("/home"), name: "home", meth: HttpGet, fn: home)
+           , Route(path: re("/items/([0-9]+)"), name: "item", meth: HttpGet, fn: item)
+           ]
 
   var server = newAsyncHttpServer()
   waitFor server.serve(Port(6000), asyncHttpHandler)
